@@ -56,6 +56,10 @@ object PyTest {
 
   }
 
+  def test() : Unit = {
+    println("################TEST############")
+  }
+
   def eval (jsc: JavaSparkContext,
             path: String,
             features: util.ArrayList[String],
@@ -180,8 +184,6 @@ object PyTest {
             maxDepth: Int,
             maxLeaves: Int,
             minChildWeight: Double,
-
-            //minChildWeight : Double,
             subsample : Double,
             sampleTree : Double,
             sampleLevel : Double,
@@ -194,21 +196,6 @@ object PyTest {
             numEarlyStoppingRounds: Int ) : Double = {
     println("HelloWorld Eval " + maxDepth)
     val sc = JavaSparkContext.toSparkContext(jsc)
-
-//    val schema = new StructType(
-//      Array(StructField("PassengerId", DoubleType),
-//        StructField("Survival", DoubleType),
-//        StructField("Pclass", DoubleType),
-//        StructField("Name", StringType),
-//        StructField("Sex", StringType),
-//        StructField("Age", DoubleType),
-//        StructField("SibSp", DoubleType),
-//        StructField("Parch", DoubleType),
-//        StructField("Ticket", StringType),
-//        StructField("Fare", DoubleType),
-//        StructField("Cabin", StringType),
-//        StructField("Embarked", StringType)
-//            ))
 
     val spark = SparkSession.builder.config(sc.getConf).getOrCreate()
 
@@ -263,13 +250,9 @@ object PyTest {
           setLabelCol(response). //setLabelCol("Survival").
           setPredictionCol("prediction")
 
-
     val pipeline = new Pipeline().setStages(Array(vectorAssembler, scaler, xgbClassifier))
 
-    //TODO: need to Balance the classes
-
-    val bal = balance(df,response,false)
-    val dfs = bal.randomSplit(Array(0.8, 0.2), seed=24)
+    val dfs = df.randomSplit(Array(0.8, 0.2))
     val trainDF = dfs(0)
     val testDF = dfs(1)
 
@@ -279,11 +262,6 @@ object PyTest {
 
     val m =getModel(model.stages)
     val f = max(m.summary.trainObjectiveHistory)
-
-//    val result = model.transform(testDF).select( "PassengerId", "prediction")
-//    result.createOrReplaceTempView("rr")
-//    result.show()
-
 
     f
   }
