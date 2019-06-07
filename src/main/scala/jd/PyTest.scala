@@ -1,15 +1,14 @@
 package jd
-import ml.dmlc.xgboost4j.java.XGBoost
+import breeze.linalg.max
+import ml.dmlc.xgboost4j.scala.spark.XGBoostClassificationModel
 import org.apache.spark.api.java.JavaSparkContext
-import org.apache.spark.ml.Pipeline
+import org.apache.spark.ml.{Pipeline, Transformer}
 import org.apache.spark.ml.feature.{StringIndexer, VectorAssembler}
-import org.apache.spark.sql.{SparkSession, types}
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.types.{StructField, StructType}
-//from pyspark.sql import DataFrame
 import org.apache.spark.sql.types.DoubleType
 import org.apache.spark.sql.types.StringType
 import ml.dmlc.xgboost4j.scala.spark.XGBoostClassifier
-import ml.dmlc.xgboost4j.scala.spark.XGBoost
 
 
 
@@ -31,33 +30,45 @@ object PyTest {
       sparkSession.sparkContext.setCheckpointDir("s3://bitdatawest/data/chk/" + System.currentTimeMillis())
     }
 
-    bar(1,"",sparkSession.sparkContext)
+    println("Best:"+ eval(sparkSession.sparkContext,
+                          "/Users/jerdavis/devlib/xgboost/train.csv",
+                          .1f,
+                          0f,
+                          20,
+                          100,
+                          1f,
+                          .9f,
+                          1f,1f,1f,
+                          1f,0f,
+                          256,
+                          30,
+                          100,
+                          10))
+
   }
 
-      def quoteRandall = {
-        println("Open unmarked doors")
+  def eval (jsc: JavaSparkContext,
+            path: String,
+            //features,
+            //response
+            eta: Double,
+            gamma: Double,
+            maxDepth: Int,
+            maxLeaves: Int,
+            minChildWeight: Double,
 
-      }
-
-    def foo(a:Int, b:String) : Unit = {
-      println("HelloWorld " + a + " " + b )
-      import java.io._
-      val pw = new PrintWriter(new File("/tmp/hello.txt" ))
-      pw.write("HelloWorld " + a + " " + b)
-      pw.close
-    }
-
-//  def bar(a:Int, b:String, jsc: JavaSparkContext) : String = {
-//
-//    val sc = JavaSparkContext.toSparkContext(jsc)
-//
-//    "HelloWorld " + a + " " + b + " " +sc.applicationId
-//  }
-
-
-
-  def bar(a:Int, b:String, jsc: JavaSparkContext) : String = {
-
+            //minChildWeight : Double,
+            subsample : Double,
+            sampleTree : Double,
+            sampleLevel : Double,
+            sampleNode : Double,
+            lambda : Double,
+            alpha : Double,
+            maxBin: Int,
+            numTrees: Int,
+            numRounds: Int,
+            numEarlyStoppingRounds: Int ) : Double = {
+    println("HelloWorld Eval " + maxDepth)
     val sc = JavaSparkContext.toSparkContext(jsc)
 
     val schema = new StructType(
@@ -76,8 +87,8 @@ object PyTest {
             ))
 
     val spark = SparkSession.builder.config(sc.getConf).getOrCreate()
-    val df_raw = spark.read.option("header", "true").schema(schema).csv("/Users/jerdavis/devlib/xgboost/train.csv")
-    val df = df_raw.na.fill(0)
+    val df_raw = spark.read.option("header", "true").schema(schema).csv(path)
+    val df = df_raw.na.drop()
 
     val sexIndexer = new StringIndexer().setInputCol("Sex").setOutputCol("SexIndex").setHandleInvalid("keep")
 
@@ -88,13 +99,35 @@ object PyTest {
     val vectorAssembler = new VectorAssembler().setInputCols( Array("Pclass", "SexIndex", "Age", "SibSp", "Parch", "Fare", "CabinIndex", "EmbarkedIndex")).setOutputCol("features")
 
     val xgbParam = Map(
-          "eta" -> 0.1f,
+          "eta" -> eta,
+          "gamma" -> gamma,
+
           "missing" -> 0.0,
           "objective" -> "binary:logistic",
-          "num_round" -> 30,
-          "maxBin" -> 256,
-          "maxDepth" -> 10,
-          "num_parallel_tree" -> 4)
+
+          "max_depth" -> maxDepth,
+          "min_child_weight" -> minChildWeight,
+
+          "subsample" -> subsample,
+          "colsample_bytree" -> sampleTree,
+          "colsample_bylevel" -> sampleLevel,
+          "colsample_bynode" -> sampleNode,
+
+          "lambda" -> lambda,
+          "alpha" -> alpha,
+
+          "eval_metric" -> "aucpr",
+            "tree_method" -> "hist",
+            "grow_policy" -> "lossguide", //lossguide or depthwise
+            "max_leaves" -> maxLeaves,
+
+          "max_bin" -> maxBin,
+          "num_parallel_tree" -> numTrees,
+
+          "maximize_evaluation_metrics" -> "true",
+          //"training_metric" -> "true",
+          "num_round" -> numRounds,
+          "num_early_stopping_rounds" -> numEarlyStoppingRounds )
 
     val xgbClassifier = new XGBoostClassifier(xgbParam).
           setFeaturesCol("features").
@@ -112,14 +145,21 @@ object PyTest {
 
     trainDF.show(5)
     val model = pipeline.fit(trainDF)
-    val result = model.transform(testDF).select( "PassengerId", "prediction")
-    result.createOrReplaceTempView("rr")
-    result.show()
+
+    val m =getModel(model.stages)
+    val f = max(m.summary.trainObjectiveHistory)
+
+//    val result = model.transform(testDF).select( "PassengerId", "prediction")
+//    result.createOrReplaceTempView("rr")
+//    result.show()
 
 
-    ""
+    f
   }
 
+  def getModel (stages: Array[Transformer]) : XGBoostClassificationModel= {
+    stages.filter(i=>i.isInstanceOf[XGBoostClassificationModel])(0).asInstanceOf[XGBoostClassificationModel]
+  }
 
 
 }
