@@ -257,7 +257,7 @@ object PyTest {
     val testDF = dfs(1)
 
 
-    trainDF.show(5)
+    //trainDF.show(5)
     val model = pipeline.fit(trainDF)
 
     val m =getModel(model.stages)
