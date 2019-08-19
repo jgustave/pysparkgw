@@ -6,19 +6,18 @@ import ml.dmlc.xgboost4j.scala.spark.XGBoostClassificationModel
 import org.apache.spark.api.java.JavaSparkContext
 import org.apache.spark.ml.{Pipeline, Transformer}
 import org.apache.spark.ml.feature.{StandardScaler, StringIndexer, VectorAssembler}
-import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.types.{StructField, StructType}
 import org.apache.spark.sql.types.DoubleType
 import org.apache.spark.sql.types.StringType
 import ml.dmlc.xgboost4j.scala.spark.XGBoostClassifier
-import org.apache.spark.sql.functions.{col, isnull, lit}
 
 import scala.collection.JavaConverters._
 
 
 
 /**
-  *
+  * aws s3 cp ./target/scala-2.11/pysparkgw_2.11-0.1.jar s3://bitdatawest/pbin/
   */
 object PyTest {
   def main(args : Array[String]) : Unit  = {
@@ -102,6 +101,9 @@ object PyTest {
     val spark = SparkSession.builder.config(sc.getConf).getOrCreate()
     val df_raw = spark.read.option("header", "true").schema(schema).csv(path)
     val df = df_raw.na.drop()
+    val dfs = df.randomSplit(Array(0.8, 0.2), seed=24)
+    val trainDF = dfs(0)
+    val testDF = dfs(1)
 
     val sexIndexer = new StringIndexer().setInputCol("Sex").setOutputCol("SexIndex").setHandleInvalid("keep")
 
@@ -144,34 +146,35 @@ object PyTest {
           "maximize_evaluation_metrics" -> "true",
           //"training_metric" -> "true",
           "num_round" -> numRounds,
-          "num_early_stopping_rounds" -> numEarlyStoppingRounds )
+          "num_early_stopping_rounds" -> numEarlyStoppingRounds,
+          "timeout_request_workers" -> 60000L )
 
     val xgbClassifier = new XGBoostClassifier(xgbParam).
           setFeaturesCol("features").
           setLabelCol(response). //setLabelCol("Survival").
-          setPredictionCol("prediction")
+          setPredictionCol("prediction").
+      setTrainTestRatio(.8)//.
+          //setEvalSets(Map("evalSet"->testDF))
 
 
     val pipeline = new Pipeline().setStages(Array(sexIndexer, cabinIndexer, embarkedIndexer, vectorAssembler, xgbClassifier))
 
 
-    val dfs = df.randomSplit(Array(0.8, 0.2), seed=24)
-    val trainDF = dfs(0)
-    val testDF = dfs(1)
-
-
-    trainDF.show(5)
     val model = pipeline.fit(trainDF)
 
     val m =getModel(model.stages)
-    val f = max(m.summary.trainObjectiveHistory)
+    //val tt =m.summary.trainObjectiveHistory
+    val vv =m.summary.validationObjectiveHistory.toMap
+
+    //val f = max(m.summary.trainObjectiveHistory)
+    val best = max(vv("test"))
 
 //    val result = model.transform(testDF).select( "PassengerId", "prediction")
 //    result.createOrReplaceTempView("rr")
 //    result.show()
 
 
-    f
+    best
   }
 
 
@@ -179,6 +182,7 @@ object PyTest {
             path: String,
             features: util.ArrayList[String],
             response: String,
+            numWorkers: Int,
             eta: Double,
             gamma: Double,
             maxDepth: Int,
@@ -201,7 +205,14 @@ object PyTest {
 
 
     val df_raw = spark.read.parquet(path)
-    val df = df_raw.na.drop()
+    val df = df_raw.na.drop().repartition(numWorkers)
+    //val df = df_raw.na.drop()
+
+//    val dfs = df.randomSplit(Array(0.8, 0.2))
+//    val trainDF = dfs(0)
+//    val testDF = dfs(1)
+
+    val trainDF = df
 
 
     val fa = features.toArray(Array(""))
@@ -215,6 +226,8 @@ object PyTest {
       .setWithMean(false)
 
     val xgbParam = Map(
+      "num_workers" -> numWorkers,
+      "nthread" -> 1,
           "eta" -> eta,
           "gamma" -> gamma,
 
@@ -248,75 +261,29 @@ object PyTest {
     val xgbClassifier = new XGBoostClassifier(xgbParam).
           setFeaturesCol("scaledFeatures").
           setLabelCol(response). //setLabelCol("Survival").
-          setPredictionCol("prediction")
+          setPredictionCol("prediction").
+          //setEvalSets(Map("evalSet"->testDF)).
+          setTrainTestRatio(.80)
+
 
     val pipeline = new Pipeline().setStages(Array(vectorAssembler, scaler, xgbClassifier))
 
-    val dfs = df.randomSplit(Array(0.8, 0.2))
-    val trainDF = dfs(0)
-    val testDF = dfs(1)
 
 
     //trainDF.show(5)
     val model = pipeline.fit(trainDF)
 
     val m =getModel(model.stages)
-    val f = max(m.summary.trainObjectiveHistory)
+    //val best = max(m.summary.trainObjectiveHistory)
+    val validations = m.summary.validationObjectiveHistory.toMap
+    val best = max(validations("test"))
 
-    f
+    best
   }
 
 
   def getModel (stages: Array[Transformer]) : XGBoostClassificationModel= {
     stages.filter(i=>i.isInstanceOf[XGBoostClassificationModel])(0).asInstanceOf[XGBoostClassificationModel]
-  }
-
-
-  /**
-    * Balance the classes by downsampling.
-    * @param input
-    * @param responseName
-    * @param isDebug
-    * @return
-    */
-  def balance (input: DataFrame, responseName:String, isDebug:Boolean ) :DataFrame = {
-
-    var rCounts = input.groupBy(responseName).count()
-    rCounts.show()
-    rCounts = rCounts.filter(!isnull(col(responseName)))
-    var countData = rCounts.orderBy(responseName).collect()
-    val neg = countData(0).getLong(1)
-    val pos = countData(1).getLong(1)
-
-    if( pos < 10000 || neg < 10000 ) {
-      println("Skipping " + responseName + " not enough examples ")
-      //LOG.info("Skipping " + responseName + " not enough examples ")
-      return input
-    }
-
-      val sampleRate = pos.toDouble/neg.toDouble
-
-      if (sampleRate <= 1.0) {
-        //LOG.info("{} Sample Rate {}", responseName, sampleRate)
-        println(responseName + " Sample Rate " + sampleRate )
-        val result = (input.filter(col(responseName) === lit(0.0)).sample(false, sampleRate)).union(input.filter(col(responseName) === lit(1.0)))
-        if( isDebug ) {
-          rCounts = result.groupBy(responseName).count()
-          rCounts.show()
-        }
-
-
-        result
-      }else {
-        //LOG.info("{} Sample Rate {}", responseName, sampleRate)
-        println(responseName + " Sample Rate " + sampleRate )
-        val result =  (input.filter(col(responseName) === lit(1.0)).sample(false, 1.0/sampleRate)).union(input.filter(col(responseName) === lit(0.0)))
-        if(isDebug) {
-          rCounts = result.groupBy(responseName).count()
-          rCounts.show()
-        }
-        result
-      }
   }
 
 
